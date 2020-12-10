@@ -1,5 +1,3 @@
-//TODO: don't copy/mount DeveloperDiskImage.dmg if it's already done - Xcode checks this somehow
-
 #import <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
 #include <unistd.h>
@@ -20,24 +18,6 @@
 #include "MobileDevice.h"
 #import "errors.h"
 #import "device_db.h"
-
-#define PREP_CMDS_PATH @"/tmp/%@/fruitstrap-lldb-prep-cmds-"
-
-const char* lldb_prep_no_cmds = "";
-
-const char* lldb_prep_interactive_cmds = "\
-    run\n\
-";
-
-const char* lldb_prep_noninteractive_justlaunch_cmds = "\
-    run\n\
-    safequit\n\
-";
-
-const char* lldb_prep_noninteractive_cmds = "\
-    run\n\
-    autoexit\n\
-";
 
 NSMutableString * custom_commands = nil;
 
@@ -61,13 +41,12 @@ int AMDeviceGetInterfaceType(AMDeviceRef device);
 int AMDServiceConnectionSend(ServiceConnRef con, const void * data, size_t size);
 int AMDServiceConnectionReceive(ServiceConnRef con, void * data, size_t size);
 
-bool found_device = false, debug = false, verbose = false, unbuffered = false, nostart = false, debugserver_only = false, detect_only = false, install = true, uninstall = false, no_wifi = false;
+bool found_device = false, verbose = false, unbuffered = false, nostart = false, detect_only = false, install = true, uninstall = false, no_wifi = false;
 bool command_only = false;
 char *command = NULL;
 char const*target_filename = NULL;
 char const*upload_pathname = NULL;
 char *bundle_id = NULL;
-bool interactive = true;
 bool justlaunch = false;
 bool file_system = false;
 bool non_recursively = false;
@@ -625,16 +604,16 @@ void mount_developer_image(AMDeviceRef device) {
         
         on_error(@"Unable to mount developer disk image. (%x)", result);
     }
-	
+    
     CFStringRef symbols_path = copy_device_support_path(device, CFSTR("Symbols"));
     if (symbols_path != NULL)
     {
         NSLogOut(@"Symbol Path: %@", symbols_path);
         NSLogJSON(@{@"Event": @"MountDeveloperImage",
                     @"SymbolsPath": (__bridge NSString *)symbols_path
-                    });		CFRelease(symbols_path);
+                    });        CFRelease(symbols_path);
     }
-	
+    
     CFRelease(image_path);
     CFRelease(options);
 }
@@ -1529,7 +1508,6 @@ void handle_device(AMDeviceRef device) {
         exit(0);
     }
 
-
     CFRetain(device); // don't know if this is necessary?
 
     CFStringRef path = CFStringCreateWithCString(NULL, app_path, kCFStringEncodingUTF8);
@@ -1573,74 +1551,74 @@ void handle_device(AMDeviceRef device) {
 
         CFDictionaryRef options;
         if (app_deltas == NULL) { // standard install
-          // NOTE: the secure version doesn't seem to require us to start the AFC service
-          ServiceConnRef afcFd;
-          connect_and_start_session(device);
-          check_error(AMDeviceSecureStartService(device, CFSTR("com.apple.afc"), NULL, &afcFd));
-          check_error(AMDeviceStopSession(device));
-          check_error(AMDeviceDisconnect(device));
-
-          CFStringRef keys[] = { CFSTR("PackageType") };
-          CFStringRef values[] = { CFSTR("Developer") };
-          options = CFDictionaryCreate(NULL, (const void **)&keys, (const void **)&values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-          check_error(AMDeviceSecureTransferPath(0, device, url, options, transfer_callback, 0));
-          AMDServiceConnectionInvalidate(afcFd);
-
-          connect_and_start_session(device);
-          check_error(AMDeviceSecureInstallApplication(0, device, url, options, install_callback, 0));
-          check_error(AMDeviceStopSession(device));
-          check_error(AMDeviceDisconnect(device));
+            // NOTE: the secure version doesn't seem to require us to start the AFC service
+            ServiceConnRef afcFd;
+            connect_and_start_session(device);
+            check_error(AMDeviceSecureStartService(device, CFSTR("com.apple.afc"), NULL, &afcFd));
+            check_error(AMDeviceStopSession(device));
+            check_error(AMDeviceDisconnect(device));
+      
+            CFStringRef keys[] = { CFSTR("PackageType") };
+            CFStringRef values[] = { CFSTR("Developer") };
+            options = CFDictionaryCreate(NULL, (const void **)&keys, (const void **)&values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            check_error(AMDeviceSecureTransferPath(0, device, url, options, transfer_callback, 0));
+            AMDServiceConnectionInvalidate(afcFd);
+      
+            connect_and_start_session(device);
+            check_error(AMDeviceSecureInstallApplication(0, device, url, options, install_callback, 0));
+            check_error(AMDeviceStopSession(device));
+            check_error(AMDeviceDisconnect(device));
         } else { // incremental install
-          CFStringRef extracted_bundle_id = NULL;
-          CFStringRef extracted_bundle_id_ref = copy_bundle_id(url);
-          if (bundle_id != NULL) {
-            extracted_bundle_id = CFStringCreateWithCString(NULL, bundle_id, kCFStringEncodingUTF8);
-            CFRelease(extracted_bundle_id_ref);
-          } else {
-            if (extracted_bundle_id_ref == NULL) {
-              on_error(@"[ ERROR] Could not determine bundle id.");
+            CFStringRef extracted_bundle_id = NULL;
+            CFStringRef extracted_bundle_id_ref = copy_bundle_id(url);
+            if (bundle_id != NULL) {
+                extracted_bundle_id = CFStringCreateWithCString(NULL, bundle_id, kCFStringEncodingUTF8);
+                CFRelease(extracted_bundle_id_ref);
+            } else {
+                if (extracted_bundle_id_ref == NULL) {
+                    on_error(@"[ ERROR] Could not determine bundle id.");
+                }
+                extracted_bundle_id = extracted_bundle_id_ref;
             }
-            extracted_bundle_id = extracted_bundle_id_ref;
-          }
-
-          CFStringRef deltas_path =
-            CFStringCreateWithCString(NULL, app_deltas, kCFStringEncodingUTF8);
-          CFURLRef deltas_relative_url =
-            CFURLCreateWithFileSystemPath(NULL, deltas_path, kCFURLPOSIXPathStyle, false);
-          CFURLRef app_deltas_url = CFURLCopyAbsoluteURL(deltas_relative_url);
-          CFStringRef prefer_wifi = no_wifi ? CFSTR("0") : CFSTR("1");
-
-          // These values were determined by inspecting Xcode 11.1 logs with the Console app.
-          CFStringRef keys[] = {
-            CFSTR("CFBundleIdentifier"),
-            CFSTR("CloseOnInvalidate"),
-            CFSTR("InvalidateOnDetach"),
-            CFSTR("IsUserInitiated"),
-            CFSTR("PackageType"),
-            CFSTR("PreferWifi"),
-            CFSTR("ShadowParentKey"),
-          };
-          CFStringRef values[] = {
-            extracted_bundle_id,
-            CFSTR("1"),
-            CFSTR("1"),
-            CFSTR("1"),
-            CFSTR("Developer"),
-            prefer_wifi,
-            (CFStringRef)app_deltas_url,
-          };
-
-          CFIndex size = sizeof(keys)/sizeof(CFStringRef);
-          options = CFDictionaryCreate(NULL, (const void **)&keys, (const void **)&values, size, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-
-          // Incremental installs should be done without a session started because of timeouts.
-          check_error(AMDeviceSecureInstallApplicationBundle(device, url, options, incremental_install_callback, 0));
-          CFRelease(extracted_bundle_id);
-          CFRelease(deltas_path);
-          CFRelease(deltas_relative_url);
-          CFRelease(app_deltas_url);
-          free(app_deltas);
-          app_deltas = NULL;
+  
+            CFStringRef deltas_path =
+                CFStringCreateWithCString(NULL, app_deltas, kCFStringEncodingUTF8);
+            CFURLRef deltas_relative_url =
+                CFURLCreateWithFileSystemPath(NULL, deltas_path, kCFURLPOSIXPathStyle, false);
+            CFURLRef app_deltas_url = CFURLCopyAbsoluteURL(deltas_relative_url);
+            CFStringRef prefer_wifi = no_wifi ? CFSTR("0") : CFSTR("1");
+  
+            // These values were determined by inspecting Xcode 11.1 logs with the Console app.
+            CFStringRef keys[] = {
+                CFSTR("CFBundleIdentifier"),
+                CFSTR("CloseOnInvalidate"),
+                CFSTR("InvalidateOnDetach"),
+                CFSTR("IsUserInitiated"),
+                CFSTR("PackageType"),
+                CFSTR("PreferWifi"),
+                CFSTR("ShadowParentKey"),
+            };
+            CFStringRef values[] = {
+                extracted_bundle_id,
+                CFSTR("1"),
+                CFSTR("1"),
+                CFSTR("1"),
+                CFSTR("Developer"),
+                prefer_wifi,
+                (CFStringRef)app_deltas_url,
+            };
+  
+            CFIndex size = sizeof(keys)/sizeof(CFStringRef);
+            options = CFDictionaryCreate(NULL, (const void **)&keys, (const void **)&values, size, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+  
+            // Incremental installs should be done without a session started because of timeouts.
+            check_error(AMDeviceSecureInstallApplicationBundle(device, url, options, incremental_install_callback, 0));
+            CFRelease(extracted_bundle_id);
+            CFRelease(deltas_path);
+            CFRelease(deltas_relative_url);
+            CFRelease(app_deltas_url);
+            free(app_deltas);
+            app_deltas = NULL;
         }
 
         CFRelease(options);
@@ -1654,8 +1632,7 @@ void handle_device(AMDeviceRef device) {
     }
     CFRelease(path);
 
-    if (!debug)
-        exit(0); // no debug phase
+    exit(0); // no debug phase
 }
 
 void device_callback(struct am_device_notification_callback_info *info, void *arg) {
@@ -1699,11 +1676,6 @@ void timeout_callback(CFRunLoopTimerRef timer, void *info) {
     }
     else
     {
-        // Device detection timeout
-        if (!debug) {
-            NSLogOut(@"[....] No more devices found.");
-        }
-
         if (detect_only && !found_device) {
             exit(exitcode_error);
             return;
@@ -1722,7 +1694,6 @@ void timeout_callback(CFRunLoopTimerRef timer, void *info) {
 void usage(const char* app) {
     NSLog(
         @"Usage: %@ [OPTION]...\n"
-        @"  -d, --debug                  launch the app in lldb after installation\n"
         @"  -i, --id <device_id>         the id of the device to connect to\n"
         @"  -c, --detect                 only detect if the device is connected\n"
         @"  -b, --bundle <bundle.app>    the path to the app bundle to be installed\n"
@@ -1730,12 +1701,7 @@ void usage(const char* app) {
         @"  -s, --envs <envs>            environment variables, space separated key-value pairs, to pass to the app when launching it\n"
         @"  -t, --timeout <timeout>      number of seconds to wait for a device to be connected\n"
         @"  -u, --unbuffered             don't buffer stdout\n"
-        @"  -n, --nostart                do not start the app when debugging\n"
-        @"  -N, --nolldb                 start debugserver only. do not run lldb. Can not be used with args or envs options\n"
-        @"  -I, --noninteractive         start in non interactive mode (quit when app crashes or exits)\n"
-        @"  -L, --justlaunch             just launch the app and exit lldb\n"
         @"  -v, --verbose                enable verbose output\n"
-        @"  -m, --noinstall              directly start debugging without app install (-d not required)\n"
         @"  -A, --app_deltas             incremental install. must specify a directory to store app deltas to determine what needs to be installed\n"
         @"  -p, --port <number>          port used for device, default: dynamic\n"
         @"  -r, --uninstall              uninstall the app before install (do not use with -m; app cache and data are cleared) \n"
@@ -1748,7 +1714,6 @@ void usage(const char* app) {
         @"  -D, --mkdir <dir>            make directory on device\n"
         @"  -R, --rm <path>              remove file or directory on device (directories must be empty)\n"
         @"  -X, --rmtree <path>          remove directory and all contained files recursively on device\n"
-        @"  -V, --version                print the executable version \n"
         @"  -e, --exists                 check if the app with given bundle_id is installed or not \n"
         @"  -B, --list_bundle_id         list bundle_id \n"
         @"  -W, --no-wifi                ignore wifi devices\n"
@@ -1758,16 +1723,8 @@ void usage(const char* app) {
         @"  --detect_deadlocks <sec>     start printing backtraces for all threads periodically after specific amount of seconds\n"
         @"  -f, --file_system            specify file system for mkdir / list / upload / download / rm\n"
         @"  -F, --non-recursively        specify non-recursively walk directory\n"
-        @"  -j, --json                   format output as JSON\n"
-        @"  --custom-script <script>     path to custom python script to execute in lldb\n"
-        @"  --custom-command <command>   specify additional lldb commands to execute\n",
+        @"  -j, --json                   format output as JSON\n",
         [NSString stringWithUTF8String:app]);
-}
-
-void show_version() {
-    NSLogOut(@"%@", @
-#include "version.h"
-             );
 }
 
 int main(int argc, char *argv[]) {
@@ -1779,45 +1736,35 @@ int main(int argc, char *argv[]) {
     tmpUUID = [(NSString*)str autorelease];
 
     static struct option longopts[] = {
-        { "debug", no_argument, NULL, 'd' },
-        { "id", required_argument, NULL, 'i' },
-        { "bundle", required_argument, NULL, 'b' },
-        { "args", required_argument, NULL, 'a' },
-        { "envs", required_argument, NULL, 's' },
-        { "verbose", no_argument, NULL, 'v' },
-        { "timeout", required_argument, NULL, 't' },
-        { "unbuffered", no_argument, NULL, 'u' },
-        { "nostart", no_argument, NULL, 'n' },
-        { "nolldb", no_argument, NULL, 'N' },
-        { "noninteractive", no_argument, NULL, 'I' },
-        { "justlaunch", no_argument, NULL, 'L' },
-        { "detect", no_argument, NULL, 'c' },
-        { "version", no_argument, NULL, 'V' },
-        { "noinstall", no_argument, NULL, 'm' },
-        { "port", required_argument, NULL, 'p' },
-        { "uninstall", no_argument, NULL, 'r' },
-        { "uninstall_only", no_argument, NULL, '9'},
-        { "list", optional_argument, NULL, 'l' },
-        { "bundle_id", required_argument, NULL, '1'},
-        { "upload", required_argument, NULL, 'o'},
-        { "download", optional_argument, NULL, 'w'},
-        { "to", required_argument, NULL, '2'},
-        { "mkdir", required_argument, NULL, 'D'},
-        { "rm", required_argument, NULL, 'R'},
-        { "rmtree",required_argument, NULL, 'X'},
-        { "exists", no_argument, NULL, 'e'},
-        { "list_bundle_id", no_argument, NULL, 'B'},
-        { "no-wifi", no_argument, NULL, 'W'},
-        { "get_battery_level", no_argument, NULL, 'C'},
-        { "output", required_argument, NULL, 'O' },
-        { "error_output", required_argument, NULL, 'E' },
-        { "detect_deadlocks", required_argument, NULL, 1000 },
-        { "json", no_argument, NULL, 'j'},
-        { "app_deltas", required_argument, NULL, 'A'},
-        { "file_system", no_argument, NULL, 'f'},
-        { "non-recursively", no_argument, NULL, 'F'},
-        { "custom-script", required_argument, NULL, 1001},
-        { "custom-command", required_argument, NULL, 1002},
+        { "id",                required_argument, NULL, 'i' },
+        { "bundle",            required_argument, NULL, 'b' },
+        { "args",              required_argument, NULL, 'a' },
+        { "envs",              required_argument, NULL, 's' },
+        { "verbose",           no_argument,       NULL, 'v' },
+        { "timeout",           required_argument, NULL, 't' },
+        { "unbuffered",        no_argument,       NULL, 'u' },
+        { "detect",            no_argument,       NULL, 'c' },
+        { "port",              required_argument, NULL, 'p' },
+        { "uninstall",         no_argument,       NULL, 'r' },
+        { "uninstall_only",    no_argument,       NULL, '9' },
+        { "list",              optional_argument, NULL, 'l' },
+        { "bundle_id",         required_argument, NULL, '1' },
+        { "upload",            required_argument, NULL, 'o' },
+        { "download",          optional_argument, NULL, 'w' },
+        { "to",                required_argument, NULL, '2' },
+        { "mkdir",             required_argument, NULL, 'D' },
+        { "rm",                required_argument, NULL, 'R' },
+        { "rmtree",            required_argument, NULL, 'X' },
+        { "exists",            no_argument,       NULL, 'e' },
+        { "list_bundle_id",    no_argument,       NULL, 'B' },
+        { "no-wifi",           no_argument,       NULL, 'W' },
+        { "get_battery_level", no_argument,       NULL, 'C' },
+        { "output",            required_argument, NULL, 'O' },
+        { "error_output",      required_argument, NULL, 'E' },
+        { "json",              no_argument,       NULL, 'j' },
+        { "app_deltas",        required_argument, NULL, 'A' },
+        { "file_system",       no_argument,       NULL, 'f' },
+        { "non-recursively",   no_argument,       NULL, 'F' },
         { NULL, 0, NULL, 0 },
     };
     int ch;
@@ -1825,63 +1772,17 @@ int main(int argc, char *argv[]) {
     while ((ch = getopt_long(argc, argv, "VmcdvunrILefFD:R:X:i:b:a:t:p:1:2:o:l:w:9BWjNs:OE:CA:", longopts, NULL)) != -1)
     {
         switch (ch) {
-        case 'm':
-            install = false;
-            debug = true;
-            break;
-        case 'd':
-            debug = true;
-            break;
-        case 'i':
-            device_id = optarg;
-            break;
-        case 'b':
-            app_path = optarg;
-            break;
-        case 'a':
-            args = optarg;
-            break;
-        case 's':
-            envs = optarg;
-            break;
-        case 'v':
-            verbose = true;
-            break;
-        case 't':
-            _timeout = atoi(optarg);
-            break;
-        case 'u':
-            unbuffered = true;
-            break;
-        case 'n':
-            nostart = true;
-            break;
-        case 'N':
-            debugserver_only = true;
-            debug = true;
-            break;
-        case 'I':
-            interactive = false;
-            debug = true;
-            break;
-        case 'L':
-            interactive = false;
-            justlaunch = true;
-            debug = true;
-            break;
-        case 'c':
-            detect_only = true;
-            debug = true;
-            break;
-        case 'V':
-            show_version();
-            return 0;
-        case 'p':
-            port = atoi(optarg);
-            break;
-        case 'r':
-            uninstall = true;
-            break;
+        case 'i': device_id = optarg;      break;
+        case 'b': app_path = optarg;       break;
+        case 'a': args = optarg;           break;
+        case 's': envs = optarg;           break;
+        case 'v': verbose = true;          break;
+        case 't': _timeout = atoi(optarg); break;
+        case 'u': unbuffered = true;       break;
+        case 'c': detect_only = true;      break;
+        case 'p': port = atoi(optarg);     break;
+        case 'r': uninstall = true;        break;
+            
         case '9':
             command_only = true;
             command = "uninstall_only";
@@ -1943,9 +1844,6 @@ int main(int argc, char *argv[]) {
         case 'E':
             error_path = optarg;
             break;
-        case 1000:
-            _detectDeadlockTimeout = atoi(optarg);
-            break;
         case 'j':
             _json_output = true;
             break;
@@ -1958,27 +1856,12 @@ int main(int argc, char *argv[]) {
         case 'F':
             non_recursively = true;
             break;
-        case 1001:
-            custom_script_path = optarg;
-            break;
-        case 1002:
-            if (custom_commands == nil)
-            {
-                custom_commands = [[NSMutableString alloc] init];
-            }
-            [custom_commands appendFormat:@"%s\n", optarg];
-            break;
         default:
             usage(argv[0]);
             return exitcode_error;
         }
     }
     
-    if (debugserver_only && (args || envs)) {
-        usage(argv[0]);
-        on_error(@"The --args and --envs options can not be combined with --nolldb.");
-    }
-
     if (!app_path && !detect_only && !command_only) {
         usage(argv[0]);
         on_error(@"One of -[b|c|o|l|w|D|R|e|9] is required to proceed!");
@@ -2000,14 +1883,12 @@ int main(int argc, char *argv[]) {
     }
 
     AMDSetLogLevel(5); // otherwise syslog gets flooded with crap
-    if (_timeout > 0)
-    {
+    if (_timeout > 0) {
         CFRunLoopTimerRef timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + _timeout, 0, 0, 0, timeout_callback, NULL);
         CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
         NSLogOut(@"[....] Waiting up to %d seconds for iOS device to be connected", _timeout);
     }
-    else
-    {
+    else {
         NSLogOut(@"[....] Waiting for iOS device to be connected");
     }
 

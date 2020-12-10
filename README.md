@@ -1,5 +1,3 @@
-[![Build Status](https://travis-ci.org/ios-control/ios-deploy.svg?branch=master)](https://travis-ci.org/ios-control/ios-deploy)
-
 ios-deploy
 ==========
 
@@ -7,50 +5,18 @@ Install and debug iOS apps from the command line. Designed to work on un-jailbro
 
 ## Requirements
 
-* macOS
-* You need to have a valid iOS Development certificate installed
-* Xcode (**NOT** just Command Line Tools!)
-
-#### Tested Configurations
-The ios-deploy binary in Homebrew should work on macOS 10.0+ with Xcode7+. It has been most recently tested with the following configurations:
- - macOS 10.14 Mojave, 10.15 Catalina and preliminary testing on 11.0b BigSur
- - iOS 13.0 and preliminary testing on iOS 14.0b
- - Xcode 11.3, 11.6 and preliminary testing on Xcode 12 betas
- - x86 and preliminary testing on Arm64e based Apple Macintosh Computers
-
-## Roadmap
-
-See our [milestones](https://github.com/phonegap/ios-deploy/milestones).
-	
-## Development
-
-The 1.x branch has been archived (renamed for now), all development is to be on the master branch for simplicity, since the planned 2.x development (break out commands into their own files) has been abandoned for now.
+* Xcode
+* Xcode CLI
 
 ## Installation
 
-If you have previously installed ios-deploy via `npm`, uninstall it by running:
 ```
-sudo npm uninstall -g ios-deploy
-```
-
-Install ios-deploy via [Homebrew](https://brew.sh/) by running:
-
-```
-brew install ios-deploy
-```
-
-## Testing
-
-Run:
-
-```
-python -m py_compile src/scripts/*.py && xcodebuild -target ios-deploy && xcodebuild test -scheme ios-deploy-tests
+gcc ios-deploy.m -o ios-deploy -F ./ -framework Foundation -framework CoreFoundation -framework MobileDevice
 ```
 
 ## Usage
 
     Usage: ios-deploy [OPTION]...
-	  -d, --debug                  launch the app in lldb after installation
 	  -i, --id <device_id>         the id of the device to connect to
 	  -c, --detect                 only detect if the device is connected
 	  -b, --bundle <bundle.app>    the path to the app bundle to be installed
@@ -58,12 +24,7 @@ python -m py_compile src/scripts/*.py && xcodebuild -target ios-deploy && xcodeb
 	  -s, --envs <envs>            environment variables, space separated key-value pairs, to pass to the app when launching it
 	  -t, --timeout <timeout>      number of seconds to wait for a device to be connected
 	  -u, --unbuffered             don't buffer stdout
-	  -n, --nostart                do not start the app when debugging
-	  -N, --nolldb                 start debugserver only. do not run lldb. Can not be used with args or envs options
-	  -I, --noninteractive         start in non interactive mode (quit when app crashes or exits)
-	  -L, --justlaunch             just launch the app and exit lldb
 	  -v, --verbose                enable verbose output
-	  -m, --noinstall              directly start debugging without app install (-d not required)
 	  -A, --app_deltas             incremental install. must specify a directory to store app deltas to determine what needs to be installed
 	  -p, --port <number>          port used for device, default: dynamic
 	  -r, --uninstall              uninstall the app before install (do not use with -m; app cache and data are cleared) 
@@ -76,7 +37,6 @@ python -m py_compile src/scripts/*.py && xcodebuild -target ios-deploy && xcodeb
 	  -D, --mkdir <dir>            make directory on device
 	  -R, --rm <path>              remove file or directory on device (directories must be empty)
 	  -X, --rmtree <path>          remove directory and all contained files recursively on device
-	  -V, --version                print the executable version 
 	  -e, --exists                 check if the app with given bundle_id is installed or not 
 	  -B, --list_bundle_id         list bundle_id 
 	  -W, --no-wifi                ignore wifi devices
@@ -151,17 +111,6 @@ The commands below assume that you have an app called `my.app` with bundle id `b
     
     // upload file to /DCIM
     ios-deploy -f -o/Users/ryan/Downloads/test.png -2/DCIM/test.png
-
-## Demo
-
-The included demo.app represents the minimum required to get code running on iOS.
-
-* `make demo.app` will generate the demo.app executable. If it doesn't compile, modify `IOS_SDK_VERSION` in the Makefile.
-* `make debug` will install demo.app and launch a LLDB session.
-
-## Notes
-
-* `--detect_deadlocks` can help to identify an exact state of application's threads in case of a deadlock. It works like this: The user specifies the amount of time ios-deploy runs the app as usual. When the timeout is elapsed ios-deploy starts to print call-stacks of all threads every 5 seconds and the app keeps running. Comparing threads' call-stacks between each other helps to identify the threads which were stuck.
 
 ## License
 
