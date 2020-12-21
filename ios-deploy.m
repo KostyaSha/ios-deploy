@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
+#include <curl/curl.h>
+
 #include "MobileDevice.h"
 #import "errors.h"
 #import "device_db.h"
@@ -44,6 +46,7 @@ int AMDServiceConnectionReceive(ServiceConnRef con, void * data, size_t size);
 bool found_device = false, verbose = false, unbuffered = false, nostart = false, detect_only = false, install = true, uninstall = false, no_wifi = false;
 bool command_only = false;
 char *command = NULL;
+const char *target_props = NULL;
 char const*target_filename = NULL;
 char const*upload_pathname = NULL;
 char *bundle_id = NULL;
@@ -78,6 +81,8 @@ CFRunLoopSourceRef fdvendor_runloop;
 const int exitcode_timeout = 252;
 const int exitcode_error = 253;
 const int exitcode_app_crash = 254;
+
+const char *notify_endpoint = 0;
 
 // Checks for MobileDevice.framework errors, tries to print them and exits.
 #define check_error(call)                                                       \
@@ -383,8 +388,11 @@ CFStringRef get_device_full_name(const AMDeviceRef device) {
     return CFAutorelease(full_name);
 }
 
-NSDictionary* get_device_json_dict(const AMDeviceRef device) {
+NSDictionary* get_device_json_dict(const AMDeviceRef device, CFStringRef connect_method) {
     NSMutableDictionary *json_dict = [NSMutableDictionary new];
+    
+    [json_dict setValue:(__bridge NSString *) connect_method forKey:@"connectMethod"]; 
+    
     AMDeviceConnect(device);
     
     CFStringRef device_udid = AMDeviceCopyDeviceIdentifier(device);
@@ -1170,6 +1178,60 @@ void get_battery_level(AMDeviceRef device)
     check_error(AMDeviceDisconnect(device));
 }
 
+void get_named_properties(AMDeviceRef device,const char *propNames) {
+    NSString *propNamesNS = [NSString stringWithUTF8String:propNames];
+    NSArray *propArray = [propNamesNS componentsSeparatedByString: @","];
+    int propCount = [propArray count];
+    
+    AMDeviceConnect(device);
+    assert(AMDeviceIsPaired(device));
+    check_error(AMDeviceValidatePairing(device));
+    check_error(AMDeviceStartSession(device));
+    
+    NSMutableDictionary *json = [NSMutableDictionary new];
+    
+    for( NSString *propNameNS in propArray ) {
+        //CFStringRef propNameCF = (__bridge CFStringRef) [NSString stringWithUTF8String:propName];
+        
+        CFStringRef result;
+        CFStringRef propNameCF;
+        if( [propNameNS containsString:@":"] ) {
+            NSArray *parts = [propNameNS componentsSeparatedByString: @":"];
+            CFStringRef domNameCF = (__bridge CFStringRef) parts[0];
+            CFStringRef propNameCF = (__bridge CFStringRef) parts[1];
+            result = AMDeviceCopyValue( device, (void *) domNameCF, propNameCF );
+        } else {
+            propNameCF = (__bridge CFStringRef) propNameNS;
+            
+            result = AMDeviceCopyValue( device, 0, propNameCF );
+        }
+        
+        //NSLogOut( @"%s:%@", propName, result );
+        if( _json_output ) {
+            if( !result ) {
+                [json setValue:@"nil" forKey:propNameNS];
+            } else {
+                NSLogOut( @"%@", result );
+                [json setValue:(__bridge NSString *)result forKey:propNameNS];
+            }
+        } else {
+            if( propCount == 1 ) {
+                NSLogOut( @"%@", result );
+            } else {
+                NSLogOut( @"%@:%@", propNameCF, result );
+            }
+        }
+        if( result ) CFRelease(result); 
+    }
+    
+    if( _json_output ) {
+        NSLogJSON( json ); 
+    }
+    
+    check_error(AMDeviceStopSession(device));
+    check_error(AMDeviceDisconnect(device));
+}
+
 void list_bundle_id(AMDeviceRef device)
 {
     connect_and_start_session(device);
@@ -1458,7 +1520,7 @@ void handle_device(AMDeviceRef device) {
     if (detect_only) {
         if (_json_output) {
             NSLogJSON(@{@"Event": @"DeviceDetected",
-                        @"Device": get_device_json_dict(device)
+                        @"Device": get_device_json_dict(device, device_interface_name)
                         });
         } else {
             NSLogOut(@"[....] Found %@ connected through %@.", device_full_name, device_interface_name);
@@ -1472,7 +1534,7 @@ void handle_device(AMDeviceRef device) {
         if (CFStringCompare(deviceCFSTR, found_device_id, kCFCompareCaseInsensitive) == kCFCompareEqualTo) {
             found_device = true;
         } else {
-            NSLogOut(@"Skipping %@.", device_full_name);
+            //NSLogOut(@"Skipping %@.", device_full_name);
             return;
         }
     } else {
@@ -1481,7 +1543,7 @@ void handle_device(AMDeviceRef device) {
         found_device = true;
     }
 
-    NSLogOut(@"[....] Using %@.", device_full_name);
+    //NSLogOut(@"[....] Using %@.", device_full_name);
 
     if (command_only) {
         if (strcmp("list", command) == 0) {
@@ -1504,6 +1566,8 @@ void handle_device(AMDeviceRef device) {
             list_bundle_id(device);
         } else if (strcmp("get_battery_level", command) == 0) {
             get_battery_level(device);
+        } else if (strcmp("get_props", command) == 0) {
+            get_named_properties(device, target_props);
         }
         exit(0);
     }
@@ -1635,6 +1699,36 @@ void handle_device(AMDeviceRef device) {
     exit(0); // no debug phase
 }
 
+void notify_connect( const char *serial ) {
+    char postdata[255];
+    snprintf( postdata, 255, "uuid=%s", serial );
+    const char *postUrl = "http://localhost:8027/dev_connect";
+    CURL *eh = curl_easy_init();
+    curl_easy_setopt( eh, CURLOPT_POSTFIELDS, postdata );
+    curl_easy_setopt( eh, CURLOPT_URL, postUrl );
+    CURLcode errCode = curl_easy_perform( eh );
+    if( errCode ) {
+        const char *err = curl_easy_strerror( errCode );
+        fprintf( stderr, "Error posting %s to %s: %s\n", postdata, postUrl, err );
+    }
+    curl_easy_cleanup( eh );
+}
+
+void notify_disconnect( const char *serial ) {
+    char postdata[255];
+    snprintf( postdata, 255, "uuid=%s", serial );
+    const char *postUrl = "http://localhost:8027/dev_disconnect";
+    CURL *eh = curl_easy_init();
+    curl_easy_setopt( eh, CURLOPT_POSTFIELDS, postdata );
+    curl_easy_setopt( eh, CURLOPT_URL, postUrl );
+    CURLcode errCode = curl_easy_perform( eh );
+    if( errCode ) {
+        const char *err = curl_easy_strerror( errCode );
+        fprintf( stderr, "Error posting %s to %s: %s\n", postdata, postUrl, err );
+    }
+    curl_easy_cleanup( eh );
+}
+
 void device_callback(struct am_device_notification_callback_info *info, void *arg) {
     switch (info->msg) {
         case ADNCI_MSG_CONNECTED:
@@ -1647,12 +1741,25 @@ void device_callback(struct am_device_notification_callback_info *info, void *ar
                 NSLogVerbose(@"Handling device type: %d", AMDeviceGetInterfaceType(info->dev));
                 handle_device(info->dev);
             }
+            
+            if( notify_endpoint ) {
+                CFStringRef device_uuid = AMDeviceCopyDeviceIdentifier(info->dev);
+                const char *uuid = [(__bridge NSString *)device_uuid UTF8String];
+                notify_connect( uuid );
+            }
+            
             break;
         case ADNCI_MSG_DISCONNECTED:
         {
             CFStringRef device_interface_name = get_device_interface_name(info->dev);
             CFStringRef device_uuid = AMDeviceCopyDeviceIdentifier(info->dev);
             NSLogOut(@"[....] Disconnected %@ from %@.", device_uuid, device_interface_name);
+            
+            if( notify_endpoint ) {
+                const char *uuid = [(__bridge NSString *)device_uuid UTF8String];
+                notify_disconnect( uuid );
+            }
+            
             CFRelease(device_uuid);
             break;
         }
@@ -1694,36 +1801,37 @@ void timeout_callback(CFRunLoopTimerRef timer, void *info) {
 void usage(const char* app) {
     NSLog(
         @"Usage: %@ [OPTION]...\n"
-        @"  -i, --id <device_id>         the id of the device to connect to\n"
-        @"  -c, --detect                 only detect if the device is connected\n"
-        @"  -b, --bundle <bundle.app>    the path to the app bundle to be installed\n"
         @"  -a, --args <args>            command line arguments to pass to the app when launching it\n"
+        @"  -b, --bundle <bundle.app>    the path to the app bundle to be installed\n"
+        @"  -d, --detect                 only detect if the device is connected\n"
+        @"  -e, --exists                 check if the app with given bundle_id is installed or not \n"
+        @"  -f, --file_system            specify file system for mkdir / list / upload / download / rm\n"
+        @"  -g, --get_props <props>      get some properties of the device\n"
+        @"  -i, --id <device_id>         the id of the device to connect to\n"
+        @"  -j, --json                   format output as JSON\n"
+        @"  -l, --list <dir>             list all app files or the specified directory\n"
+        @"  -n, --notify <http endport>  http endpoint to notify on device detect/disconnect\n"
+        @"  -o, --upload <file>          upload file\n"
+        @"  -p, --port <number>          port used for device, default: dynamic\n"
         @"  -s, --envs <envs>            environment variables, space separated key-value pairs, to pass to the app when launching it\n"
         @"  -t, --timeout <timeout>      number of seconds to wait for a device to be connected\n"
         @"  -u, --unbuffered             don't buffer stdout\n"
         @"  -v, --verbose                enable verbose output\n"
+        @"  -w, --download <path>        download app tree or the specified file/directory\n"
         @"  -A, --app_deltas             incremental install. must specify a directory to store app deltas to determine what needs to be installed\n"
-        @"  -p, --port <number>          port used for device, default: dynamic\n"
         @"  -r, --uninstall              uninstall the app before install (do not use with -m; app cache and data are cleared) \n"
-        @"  -9, --uninstall_only         uninstall the app ONLY. Use only with -1 <bundle_id> \n"
         @"  -1, --bundle_id <bundle id>  specify bundle id for list and upload\n"
-        @"  -l, --list[=<dir>]           list all app files or the specified directory\n"
-        @"  -o, --upload <file>          upload file\n"
-        @"  -w, --download[=<path>]      download app tree or the specified file/directory\n"
+        @"  -9, --uninstall_only         uninstall the app ONLY. Use only with -1 <bundle_id> \n"
         @"  -2, --to <target pathname>   use together with up/download file/tree. specify target\n"
-        @"  -D, --mkdir <dir>            make directory on device\n"
-        @"  -R, --rm <path>              remove file or directory on device (directories must be empty)\n"
-        @"  -X, --rmtree <path>          remove directory and all contained files recursively on device\n"
-        @"  -e, --exists                 check if the app with given bundle_id is installed or not \n"
         @"  -B, --list_bundle_id         list bundle_id \n"
-        @"  -W, --no-wifi                ignore wifi devices\n"
         @"  -C, --get_battery_level      get battery current capacity \n"
-        @"  -O, --output <file>          write stdout to this file\n"
+        @"  -D, --mkdir <dir>            make directory on device\n"
         @"  -E, --error_output <file>    write stderr to this file\n"
-        @"  --detect_deadlocks <sec>     start printing backtraces for all threads periodically after specific amount of seconds\n"
-        @"  -f, --file_system            specify file system for mkdir / list / upload / download / rm\n"
         @"  -F, --non-recursively        specify non-recursively walk directory\n"
-        @"  -j, --json                   format output as JSON\n",
+        @"  -O, --output <file>          write stdout to this file\n"
+        @"  -R, --rm <path>              remove file or directory on device (directories must be empty)\n"
+        @"  -W, --no-wifi                ignore wifi devices\n"
+        @"  -X, --rmtree <path>          remove directory and all contained files recursively on device\n",
         [NSString stringWithUTF8String:app]);
 }
 
@@ -1736,126 +1844,123 @@ int main(int argc, char *argv[]) {
     tmpUUID = [(NSString*)str autorelease];
 
     static struct option longopts[] = {
-        { "id",                required_argument, NULL, 'i' },
-        { "bundle",            required_argument, NULL, 'b' },
         { "args",              required_argument, NULL, 'a' },
-        { "envs",              required_argument, NULL, 's' },
-        { "verbose",           no_argument,       NULL, 'v' },
-        { "timeout",           required_argument, NULL, 't' },
-        { "unbuffered",        no_argument,       NULL, 'u' },
-        { "detect",            no_argument,       NULL, 'c' },
+        { "bundle",            required_argument, NULL, 'b' },
+        { "detect",            no_argument,       NULL, 'd' },
+        { "exists",            no_argument,       NULL, 'e' },
+        { "file_system",       no_argument,       NULL, 'f' },
+        { "get_props",         required_argument, NULL, 'g' },
+        { "id",                required_argument, NULL, 'i' },
+        { "json",              no_argument,       NULL, 'j' },
+        { "list",              optional_argument, NULL, 'l' },
+        { "notify",            required_argument, NULL, 'n' },
+        { "upload",            required_argument, NULL, 'o' },
         { "port",              required_argument, NULL, 'p' },
         { "uninstall",         no_argument,       NULL, 'r' },
-        { "uninstall_only",    no_argument,       NULL, '9' },
-        { "list",              optional_argument, NULL, 'l' },
-        { "bundle_id",         required_argument, NULL, '1' },
-        { "upload",            required_argument, NULL, 'o' },
+        { "envs",              required_argument, NULL, 's' },
+        { "timeout",           required_argument, NULL, 't' },
+        { "unbuffered",        no_argument,       NULL, 'u' },
+        { "verbose",           no_argument,       NULL, 'v' },
         { "download",          optional_argument, NULL, 'w' },
+        
+        { "bundle_id",         required_argument, NULL, '1' },
         { "to",                required_argument, NULL, '2' },
-        { "mkdir",             required_argument, NULL, 'D' },
-        { "rm",                required_argument, NULL, 'R' },
-        { "rmtree",            required_argument, NULL, 'X' },
-        { "exists",            no_argument,       NULL, 'e' },
-        { "list_bundle_id",    no_argument,       NULL, 'B' },
-        { "no-wifi",           no_argument,       NULL, 'W' },
-        { "get_battery_level", no_argument,       NULL, 'C' },
-        { "output",            required_argument, NULL, 'O' },
-        { "error_output",      required_argument, NULL, 'E' },
-        { "json",              no_argument,       NULL, 'j' },
+        { "uninstall_only",    no_argument,       NULL, '9' },
+        
         { "app_deltas",        required_argument, NULL, 'A' },
-        { "file_system",       no_argument,       NULL, 'f' },
+        { "list_bundle_id",    no_argument,       NULL, 'B' },
+        { "get_battery_level", no_argument,       NULL, 'C' },
+        { "mkdir",             required_argument, NULL, 'D' },
+        { "error_output",      required_argument, NULL, 'E' },
         { "non-recursively",   no_argument,       NULL, 'F' },
+        { "output",            required_argument, NULL, 'O' },
+        { "rm",                required_argument, NULL, 'R' },
+        { "no-wifi",           no_argument,       NULL, 'W' },
+        { "rmtree",            required_argument, NULL, 'X' },
+        
         { NULL, 0, NULL, 0 },
     };
     int ch;
 
-    while ((ch = getopt_long(argc, argv, "VmcdvunrILefFD:R:X:i:b:a:t:p:1:2:o:l:w:9BWjNs:OE:CA:", longopts, NULL)) != -1)
+    while ((ch = getopt_long(argc, argv, "a:b:cdefg:i:jl::n:o:p:rs:t:uvw::1:2:9A:BCD:E:FO:R:WX:", longopts, NULL)) != -1)
     {
         switch (ch) {
-        case 'i': device_id = optarg;      break;
-        case 'b': app_path = optarg;       break;
-        case 'a': args = optarg;           break;
-        case 's': envs = optarg;           break;
-        case 'v': verbose = true;          break;
-        case 't': _timeout = atoi(optarg); break;
-        case 'u': unbuffered = true;       break;
-        case 'c': detect_only = true;      break;
-        case 'p': port = atoi(optarg);     break;
-        case 'r': uninstall = true;        break;
-            
-        case '9':
+        case 'a': args = optarg;            break;
+        case 'b': app_path = optarg;        break;
+        case 'd': detect_only = true;       break;
+        case 'e':
             command_only = true;
-            command = "uninstall_only";
+            command = "exists";
             break;
-        case '1':
-            bundle_id = optarg;
-            break;
-        case '2':
-            target_filename = optarg;
-            break;
-        case 'o':
+        case 'f': file_system = true;       break;
+        case 'g':
+            target_props = optarg;
             command_only = true;
-            upload_pathname = optarg;
-            command = "upload";
+            command = "get_props";
             break;
+        case 'i': device_id = optarg;       break;
+        case 'j': _json_output = true;      break;
         case 'l':
             command_only = true;
             command = "list";
             list_root = optarg;
             break;
+        case 'n': notify_endpoint = optarg; break;
+        case 'o':
+            command_only = true;
+            upload_pathname = optarg;
+            command = "upload";
+            break;
+        case 'p': port = atoi(optarg);      break;
+        case 'r': uninstall = true;         break;
+        case 's': envs = optarg;            break;
+        case 't': _timeout = atoi(optarg);  break;
+        case 'u': unbuffered = true;        break;
+        case 'v': verbose = true;           break;
         case 'w':
             command_only = true;
             command = "download";
             list_root = optarg;
+            break;
+            
+        case '1': bundle_id = optarg;       break;
+        case '2': target_filename = optarg; break;
+        case '9':
+            command_only = true;
+            command = "uninstall_only";
+            break;
+        
+        case 'A':
+            app_deltas = resolve_path(optarg);
+            break;
+        case 'B':
+            command_only = true;
+            command = "list_bundle_id";
+            break;
+        case 'C':
+            command_only = true;
+            command = "get_battery_level";
             break;
         case 'D':
             command_only = true;
             target_filename = optarg;
             command = "mkdir";
             break;
+        case 'E': error_path = optarg;      break;
+        case 'F': non_recursively = true;   break;
+        case 'O': output_path = optarg;     break;
         case 'R':
             command_only = true;
             target_filename = optarg;
             command = "rm";
             break;
+        case 'W': no_wifi = true;           break;
         case 'X':
             command_only = true;
             target_filename = optarg;
             command = "rmtree";
             break;
-        case 'e':
-            command_only = true;
-            command = "exists";
-            break;
-        case 'B':
-            command_only = true;
-            command = "list_bundle_id";
-            break;
-        case 'W':
-            no_wifi = true;
-            break;
-        case 'C':
-            command_only = true;
-            command = "get_battery_level";
-            break;
-        case 'O':
-            output_path = optarg;
-            break;
-        case 'E':
-            error_path = optarg;
-            break;
-        case 'j':
-            _json_output = true;
-            break;
-        case 'A':
-            app_deltas = resolve_path(optarg);
-            break;
-        case 'f':
-            file_system = true;
-            break;
-        case 'F':
-            non_recursively = true;
-            break;
+        
         default:
             usage(argv[0]);
             return exitcode_error;
@@ -1864,7 +1969,7 @@ int main(int argc, char *argv[]) {
     
     if (!app_path && !detect_only && !command_only) {
         usage(argv[0]);
-        on_error(@"One of -[b|c|o|l|w|D|R|e|9] is required to proceed!");
+        on_error(@"One of -[b|c|e|l|o|w|D|R|9] is required to proceed!");
     }
 
     if (unbuffered) {
@@ -1872,9 +1977,9 @@ int main(int argc, char *argv[]) {
         setbuf(stderr, NULL);
     }
 
-    if (detect_only && _timeout == 0) {
+    /*if (detect_only && _timeout == 0) {
         _timeout = 5;
-    }
+    }*/
 
     if (app_path) {
         if (access(app_path, F_OK) != 0) {
@@ -1886,10 +1991,10 @@ int main(int argc, char *argv[]) {
     if (_timeout > 0) {
         CFRunLoopTimerRef timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + _timeout, 0, 0, 0, timeout_callback, NULL);
         CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
-        NSLogOut(@"[....] Waiting up to %d seconds for iOS device to be connected", _timeout);
+        // NSLogOut(@"[....] Waiting up to %d seconds for iOS device to be connected", _timeout);
     }
     else {
-        NSLogOut(@"[....] Waiting for iOS device to be connected");
+        if( !command_only ) NSLogOut(@"[....] Waiting for iOS device to be connected");
     }
 
     AMDeviceNotificationSubscribe(&device_callback, 0, 0, NULL, &notify);
